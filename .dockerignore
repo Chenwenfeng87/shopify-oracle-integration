@@ -1,0 +1,119 @@
+# =============================================================================
+# .dockerignore - Shopify-Oracle Integration
+#
+# Excludes unnecessary files from the Docker build context to:
+#   - Reduce the build context size for faster builds
+#   - Prevent secrets from leaking into images
+#   - Avoid invalidating cache with irrelevant file changes
+# =============================================================================
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Dependencies - reinstalled inside containers
+# ──────────────────────────────────────────────────────────────────────────────
+node_modules/
+packages/shared/node_modules/
+packages/backend/node_modules/
+packages/worker/node_modules/
+packages/frontend/node_modules/
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Build artifacts - compiled inside the build stage
+# ──────────────────────────────────────────────────────────────────────────────
+dist/
+build/
+packages/shared/dist/
+packages/backend/dist/
+packages/worker/dist/
+packages/frontend/dist/
+*.tsbuildinfo
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Environment & Secrets - NEVER include in images
+# ──────────────────────────────────────────────────────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+*.cert
+secrets/
+credentials/
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Version control
+# ──────────────────────────────────────────────────────────────────────────────
+.git/
+.gitattributes
+.gitignore
+.gitmodules
+.github/
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tests & Coverage - not needed in production images
+# ──────────────────────────────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+__tests__/
+tests/
+test/
+packages/*/tests/
+packages/*/test/
+jest.config.js
+jest.config.ts
+vitest.config.ts
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Documentation
+# ──────────────────────────────────────────────────────────────────────────────
+docs/
+*.md
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+LICENSE
+
+# ──────────────────────────────────────────────────────────────────────────────
+# IDE & Editor files
+# ──────────────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.vs/
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OS files
+# ──────────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Logs & Cache
+# ──────────────────────────────────────────────────────────────────────────────
+*.log
+.eslintcache
+.prettiercache
+.cache/
+.turbo/
+.tmp/
+tmp/
+temp/
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CI/CD
+# ──────────────────────────────────────────────────────────────────────────────
+.github/
+.husky/
+.circleci/
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Docker files - not needed inside the build context
+# ──────────────────────────────────────────────────────────────────────────────
+docker-compose*.yml
+Dockerfile*
+.dockerignore

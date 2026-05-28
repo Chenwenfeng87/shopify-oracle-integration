@@ -1,0 +1,291 @@
+version: "3.8"
+
+# =============================================================================
+# docker-compose.prod.yml - Production Deployment
+#
+# Overrides the development compose file with production-appropriate settings:
+#   - No bind mounts (immutable images)
+#   - Restart policies for high availability
+#   - Resource limits to prevent resource exhaustion
+#   - Structured logging with max-size rotation
+#   - Secrets managed via environment files (never in compose)
+#   - Health check dependencies
+#
+# Usage:
+#   docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Environment variables must be set in a .env.production file or in the shell:
+#   export $(grep -v '^#' .env.production | xargs)
+#   docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# =============================================================================
+
+services:
+  # ────────────────────────────────────────────────────────────────────────────
+  # PostgreSQL
+  # ────────────────────────────────────────────────────────────────────────────
+  postgres:
+    restart: always
+    ports:
+      - "127.0.0.1:5432:5432"
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+        compress: "true"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Redis
+  # ────────────────────────────────────────────────────────────────────────────
+  redis:
+    restart: always
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --auto-aof-rewrite-percentage 100
+      --auto-aof-rewrite-min-size 64mb
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1.5G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+        compress: "true"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # RabbitMQ
+  # ────────────────────────────────────────────────────────────────────────────
+  rabbitmq:
+    restart: always
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+        compress: "true"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Backend - Express API server (production image)
+  # ────────────────────────────────────────────────────────────────────────────
+  backend:
+    build:
+      target: production
+    restart: always
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes: []
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      SHOPIFY_API_KEY: ${SHOPIFY_API_KEY}
+      SHOPIFY_API_SECRET: ${SHOPIFY_API_SECRET}
+      SHOPIFY_SCOPES: ${SHOPIFY_SCOPES}
+      SHOPIFY_APP_URL: ${SHOPIFY_APP_URL}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      SENTRY_DSN: ${SENTRY_DSN}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      FRONTEND_URL: ${FRONTEND_URL}
+      ORACLE_CLOUD_USER: ${ORACLE_CLOUD_USER}
+      ORACLE_CLOUD_PASS: ${ORACLE_CLOUD_PASS}
+      ORACLE_CLOUD_HOST: ${ORACLE_CLOUD_HOST}
+      ORACLE_CLOUD_TENANT: ${ORACLE_CLOUD_TENANT}
+    deploy:
+      replicas: ${BACKEND_REPLICAS:-2}
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+      update_config:
+        parallelism: 1
+        delay: 15s
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "25m"
+        max-file: "5"
+        compress: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Worker - Background job consumer (production image)
+  # ────────────────────────────────────────────────────────────────────────────
+  worker:
+    build:
+      target: production
+    restart: always
+    volumes: []
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      RABBITMQ_PREFETCH: ${RABBITMQ_PREFETCH:-10}
+      HEARTBEAT_INTERVAL_MS: ${HEARTBEAT_INTERVAL_MS:-60000}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      SENTRY_DSN: ${SENTRY_DSN}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      ORACLE_CLOUD_USER: ${ORACLE_CLOUD_USER}
+      ORACLE_CLOUD_PASS: ${ORACLE_CLOUD_PASS}
+      ORACLE_CLOUD_HOST: ${ORACLE_CLOUD_HOST}
+      ORACLE_CLOUD_TENANT: ${ORACLE_CLOUD_TENANT}
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+      update_config:
+        parallelism: 1
+        delay: 15s
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "25m"
+        max-file: "5"
+        compress: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep -v grep | grep -q 'node.*packages/worker/dist/index.js' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Frontend - React SPA (production nginx image)
+  # ────────────────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      target: production
+    restart: always
+    ports:
+      - "127.0.0.1:3001:80"
+    volumes: []
+    depends_on:
+      - backend
+    deploy:
+      replicas: ${FRONTEND_REPLICAS:-1}
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "25m"
+        max-file: "3"
+        compress: "true"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Nginx - Reverse proxy (production)
+  # ────────────────────────────────────────────────────────────────────────────
+  nginx:
+    restart: always
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+      - frontend
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "25m"
+        max-file: "5"
+        compress: "true"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Volumes (keep persistent data across restarts)
+# ──────────────────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+    name: shopify-oracle-postgres-data-prod
+  redis_data:
+    name: shopify-oracle-redis-data-prod
+  rabbitmq_data:
+    name: shopify-oracle-rabbitmq-data-prod

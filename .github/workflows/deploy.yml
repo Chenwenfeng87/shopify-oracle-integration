@@ -1,0 +1,318 @@
+# =============================================================================
+# deploy.yml - Deployment Pipeline
+#
+# Triggered when a GitHub Release is published.
+# Pipeline:
+#   1. Build and push Docker images with version tags
+#   2. Deploy to target environment (AWS ECS or Docker Swarm)
+#   3. Run database migrations
+#   4. Smoke test (health check validation)
+#   5. Notify Slack on success/failure
+# =============================================================================
+
+name: Deploy
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target deployment environment"
+        required: true
+        default: staging
+        type: choice
+        options:
+          - staging
+          - production
+      tag:
+        description: "Docker image tag to deploy (defaults to release tag)"
+        required: false
+        type: string
+
+env:
+  NODE_VERSION: "20"
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  # Deployment target - set these as repository secrets or environment secrets
+  # AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  # AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  # SSH_DEPLOY_HOST: ${{ secrets.SSH_DEPLOY_HOST }}
+  # SSH_DEPLOY_KEY: ${{ secrets.SSH_DEPLOY_KEY }}
+  # SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Build & Push - Create production Docker images
+  # ────────────────────────────────────────────────────────────────────────────
+  build-and-push:
+    name: Build and Push Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      backend_tag: ${{ steps.set-tags.outputs.backend_tag }}
+      worker_tag: ${{ steps.set-tags.outputs.worker_tag }}
+      frontend_tag: ${{ steps.set-tags.outputs.frontend_tag }}
+      version: ${{ steps.set-tags.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image tags
+        id: set-tags
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+          else
+            VERSION="${{ inputs.tag }}"
+          fi
+          VERSION="${VERSION:-${{ github.sha }}}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "backend_tag=${REGISTRY}/${IMAGE_NAME}/backend:${VERSION}" >> $GITHUB_OUTPUT
+          echo "worker_tag=${REGISTRY}/${IMAGE_NAME}/worker:${VERSION}" >> $GITHUB_OUTPUT
+          echo "frontend_tag=${REGISTRY}/${IMAGE_NAME}/frontend:${VERSION}" >> $GITHUB_OUTPUT
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.backend
+          target: production
+          push: true
+          tags: |
+            ${{ steps.set-tags.outputs.backend_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.set-tags.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push worker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.worker
+          target: production
+          push: true
+          tags: |
+            ${{ steps.set-tags.outputs.worker_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/worker:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.set-tags.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.frontend
+          target: production
+          push: true
+          tags: |
+            ${{ steps.set-tags.outputs.frontend_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/frontend:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.set-tags.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Deploy - Deploy containers to target environment
+  # ────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to ${{ github.event_name == 'release' && 'production' || inputs.environment }}
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ github.event_name == 'release' && 'production' || inputs.environment }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_DEPLOY_KEY }}
+          known_hosts: ${{ secrets.SSH_KNOWN_HOSTS }}
+        if: ${{ secrets.SSH_DEPLOY_KEY != '' }}
+
+      - name: Create deployment directory
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_DEPLOY_USER }}@${{ secrets.SSH_DEPLOY_HOST }} "
+            mkdir -p /opt/shopify-oracle/deployments/${{ needs.build-and-push.outputs.version }}
+          "
+
+      - name: Copy docker-compose files
+        run: |
+          scp -o StrictHostKeyChecking=no \
+            docker-compose.yml \
+            docker-compose.prod.yml \
+            nginx.conf \
+            ${{ secrets.SSH_DEPLOY_USER }}@${{ secrets.SSH_DEPLOY_HOST }}:/opt/shopify-oracle/deployments/${{ needs.build-and-push.outputs.version }}/
+
+      - name: Create .env file on server
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_DEPLOY_USER }}@${{ secrets.SSH_DEPLOY_HOST }} "
+            cat > /opt/shopify-oracle/deployments/${{ needs.build-and-push.outputs.version }}/.env << 'ENVEOF'
+            NODE_ENV=production
+            DATABASE_URL=${{ secrets.DATABASE_URL }}
+            REDIS_URL=${{ secrets.REDIS_URL }}
+            RABBITMQ_URL=${{ secrets.RABBITMQ_URL }}
+            SHOPIFY_API_KEY=${{ secrets.SHOPIFY_API_KEY }}
+            SHOPIFY_API_SECRET=${{ secrets.SHOPIFY_API_SECRET }}
+            SHOPIFY_SCOPES=${{ secrets.SHOPIFY_SCOPES }}
+            SHOPIFY_APP_URL=${{ secrets.SHOPIFY_APP_URL }}
+            ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}
+            SENTRY_DSN=${{ secrets.SENTRY_DSN }}
+            LOG_LEVEL=info
+            FRONTEND_URL=${{ secrets.FRONTEND_URL }}
+            BACKEND_IMAGE=${{ needs.build-and-push.outputs.backend_tag }}
+            WORKER_IMAGE=${{ needs.build-and-push.outputs.worker_tag }}
+            FRONTEND_IMAGE=${{ needs.build-and-push.outputs.frontend_tag }}
+            ENVEOF
+          "
+
+      - name: Deploy with Docker Compose
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_DEPLOY_USER }}@${{ secrets.SSH_DEPLOY_HOST }} "
+            cd /opt/shopify-oracle/deployments/${{ needs.build-and-push.outputs.version }}
+            docker-compose -f docker-compose.yml -f docker-compose.prod.yml pull
+            docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+          "
+
+      # ────────────────────────────────────────────────────────────────────────
+      # Database Migrations
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Run database migrations
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SSH_DEPLOY_USER }}@${{ secrets.SSH_DEPLOY_HOST }} "
+            cd /opt/shopify-oracle/deployments/${{ needs.build-and-push.outputs.version }}
+            docker-compose -f docker-compose.yml -f docker-compose.prod.yml run --rm \
+              -e DATABASE_URL='${{ secrets.DATABASE_URL }}' \
+              backend npm run db:migrate
+          "
+
+      # ────────────────────────────────────────────────────────────────────────
+      # Smoke Test - Verify the deployment is healthy
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Smoke test - Health check
+        run: |
+          DEPLOY_URL="https://${{ secrets.SHOPIFY_APP_URL }}"
+          echo "Running smoke test against ${DEPLOY_URL}"
+
+          for i in $(seq 1 12); do
+            echo "Attempt $i of 12..."
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${DEPLOY_URL}/health" || echo "000")
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "Health check passed! (status: 200)"
+              # Verify the response body
+              RESPONSE=$(curl -s "${DEPLOY_URL}/health")
+              echo "Health response: $RESPONSE"
+              STATUS=$(echo "$RESPONSE" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+              echo "Service status: $STATUS"
+
+              if echo "$RESPONSE" | grep -q '"database":true'; then
+                echo "Database connection verified"
+              else
+                echo "WARNING: Database check returned non-healthy"
+              fi
+
+              exit 0
+            fi
+            echo "Health check returned status $HTTP_STATUS, retrying in 10s..."
+            sleep 10
+          done
+
+          echo "Health check failed after 12 attempts"
+          exit 1
+
+      - name: Deployment summary
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Image Tag |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend | ${{ needs.build-and-push.outputs.backend_tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Worker | ${{ needs.build-and-push.outputs.worker_tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend | ${{ needs.build-and-push.outputs.frontend_tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ github.event_name == 'release' && 'production' || inputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployed at | $(date -u) |" >> $GITHUB_STEP_SUMMARY
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Notify - Slack notification on deployment result
+  # ────────────────────────────────────────────────────────────────────────────
+  notify:
+    name: Send notification
+    needs: [build-and-push, deploy]
+    runs-on: ubuntu-latest
+    if: always()
+    timeout-minutes: 5
+
+    steps:
+      - name: Determine deployment status
+        id: status
+        run: |
+          if [ "${{ needs.deploy.result }}" = "success" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "color=good" >> $GITHUB_OUTPUT
+            echo "emoji=:white_check_mark:" >> $GITHUB_OUTPUT
+          elif [ "${{ needs.deploy.result }}" = "cancelled" ]; then
+            echo "status=cancelled" >> $GITHUB_OUTPUT
+            echo "color=warning" >> $GITHUB_OUTPUT
+            echo "emoji=:warning:" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "color=danger" >> $GITHUB_OUTPUT
+            echo "emoji=:x:" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "Deployment ${{ steps.status.outputs.status }}: ${{ github.repository }}@${{ needs.build-and-push.outputs.version }}",
+              "attachments": [
+                {
+                  "color": "${{ steps.status.outputs.color }}",
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": "${{ steps.status.outputs.emoji }} *Deployment ${{ steps.status.outputs.status }}*\n*Repository:* ${{ github.repository }}\n*Version:* ${{ needs.build-and-push.outputs.version }}\n*Environment:* ${{ github.event_name == 'release' && 'production' || inputs.environment }}\n*Triggered by:* ${{ github.actor }}\n*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}

@@ -1,0 +1,101 @@
+# =============================================================================
+# Dockerfile.worker - Shopify-Oracle Integration Background Worker
+# Multi-stage build: development -> build -> production
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 0: Base - shared dependencies for all stages
+# -----------------------------------------------------------------------------
+FROM node:20-alpine AS base
+
+RUN apk add --no-cache tini curl
+
+WORKDIR /app
+
+# Copy root workspace configuration
+COPY package.json package-lock.json tsconfig.base.json .eslintrc.json .prettierrc ./
+
+# Copy shared package
+COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
+COPY packages/shared/src ./packages/shared/src
+
+# Copy worker package
+COPY packages/worker/package.json packages/worker/tsconfig.json ./packages/worker/
+
+# -----------------------------------------------------------------------------
+# Stage 1: Development - hot-reload ready
+# -----------------------------------------------------------------------------
+FROM base AS development
+
+RUN apk add --no-cache --virtual .build-deps python3 make g++
+
+# Install all dependencies (including devDependencies)
+RUN npm ci
+
+# Copy source code for all workspaces
+COPY packages/shared ./packages/shared
+COPY packages/worker ./packages/worker
+
+# Build shared package (dependency for worker)
+RUN npm run build -w packages/shared
+
+# Use ts-node-dev for hot-reload development
+CMD ["npm", "run", "dev", "-w", "packages/worker"]
+
+# -----------------------------------------------------------------------------
+# Stage 2: Build - compile TypeScript to JavaScript
+# -----------------------------------------------------------------------------
+FROM base AS build
+
+RUN apk add --no-cache --virtual .build-deps python3 make g++
+
+# Install all dependencies
+RUN npm ci
+
+# Copy source code
+COPY packages/shared ./packages/shared
+COPY packages/worker ./packages/worker
+
+# Build all packages
+RUN npm run build
+
+# Prune devDependencies
+RUN npm prune --omit=dev
+
+# -----------------------------------------------------------------------------
+# Stage 3: Production - minimal runtime image
+# -----------------------------------------------------------------------------
+FROM node:20-alpine AS production
+
+RUN apk add --no-cache tini curl
+
+# Create non-root user
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -S -u 1001 -G appgroup appuser
+
+WORKDIR /app
+
+# Copy built artifacts and production node_modules from build stage
+COPY --from=build /app/packages/shared/dist ./packages/shared/dist
+COPY --from=build /app/packages/shared/node_modules ./packages/shared/node_modules
+COPY --from=build /app/packages/worker/dist ./packages/worker/dist
+COPY --from=build /app/packages/worker/node_modules ./packages/worker/node_modules
+COPY --from=build /app/packages/worker/package.json ./packages/worker/
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/package.json ./package.json
+
+# Set ownership to non-root user
+RUN chown -R appuser:appgroup /app
+
+USER appuser
+
+# Health check - verify the worker process is alive via PID check
+# Worker does not expose HTTP, so we check the process is running
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+  CMD sh -c "ps aux | grep -v grep | grep -q 'node.*packages/worker/dist/index.js' || exit 1"
+
+# Use tini as init for proper signal handling
+ENTRYPOINT ["/sbin/tini", "--"]
+
+# Start the worker
+CMD ["node", "packages/worker/dist/index.js"]

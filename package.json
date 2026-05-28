@@ -1,0 +1,36 @@
+{
+  "name": "shopify-oracle-integration",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Shopify × Oracle Fusion Cloud Integration App",
+  "workspaces": [
+    "packages/shared",
+    "packages/backend",
+    "packages/worker",
+    "packages/frontend"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "dev": "concurrently \"npm run dev -w packages/backend\" \"npm run dev -w packages/worker\" \"npm run dev -w packages/frontend\"",
+    "lint": "eslint packages/*/src --ext .ts,.tsx",
+    "format": "prettier --write \"packages/*/src/**/*.{ts,tsx,json}\"",
+    "test": "jest --config jest.config.js",
+    "test:coverage": "jest --config jest.config.js --coverage",
+    "db:migrate": "node-pg-migrate -m database/migrations -d DATABASE_URL",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.14.0",
+    "@typescript-eslint/eslint-plugin": "^7.12.0",
+    "@typescript-eslint/parser": "^7.12.0",
+    "concurrently": "^8.2.2",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "jest": "^29.7.0",
+    "prettier": "^3.3.0",
+    "ts-jest": "^29.1.5",
+    "typescript": "^5.4.5"
+  }
+}
